@@ -1,69 +1,146 @@
-# Improve System: Claude Code that improves itself
+# improve-system
 
-Every conversation you have with Claude Code is saved on your computer, in `~/.claude/projects/`. This skill reads that history and tells you what Claude gets wrong, what you keep repeating, which skills to create and which tasks you redo every day. Then it writes the rule, hook, skill or automation you pick. On the next run, it checks whether those changes actually worked.
+A Claude Code skill that reads your own session history and turns it into fixes: rules, hooks, skills and automations. On the next run it measures whether the previous fixes actually worked.
 
-## In 3 steps
+Every Claude Code conversation is saved on disk in `~/.claude/projects/<folder>/*.jsonl`. That history already contains the answer to "why do I keep correcting the same thing?" — `improve-system` mines it, reports it with evidence, and writes the change you pick.
 
-1. **Add the skill to Claude**, for all your projects:
+Manual only: it never starts on its own.
 
-   ```bash
-   npx skills add Melvynx/shared-skills --skill improve-system -g -a claude-code
-   ```
+## Install
 
-2. **Run it** in Claude Code:
+Requires Node.js 18+ and Claude Code (or Codex — see [Compatibility](#compatibility)).
 
-   ```text
-   /improve-system
-   ```
+```bash
+npx skills add S1933/improve-system --skill improve-system -g -a claude-code
+```
 
-   The skill never starts on its own: only when you type the command. Add a number to read more days: `/improve-system 14` (7 by default, 90 max).
+Then, in Claude Code:
 
-3. **Pick what it builds**: a rule, a hook, a new skill or an automation.
+```text
+/improve-system          # last 7 days
+/improve-system 14       # last 14 days (1–90)
+/improve-system 7 auto   # scheduled mode: report only, build nothing
+```
 
-## What the skill does
+## How it works
 
-- `scripts/digest.mjs` reads your sessions from the last days and turns them into one short file: your messages, detected corrections and interruptions, repeated messages (close wordings included), errors by tool, an estimate of active time, and the instruction files found on disk (`CLAUDE.md`, `AGENTS.md`). Dates are in local time.
-- Messages copied into a resumed session are counted once. Malformed JSONL lines and invalid timestamps are counted.
-- The digest is written to a private temp folder (permissions 700/600), never to a predictable shared path.
-- Claude turns it into a report: follow-up on previous changes, what Claude gets wrong, what you repeat, skills to create, tasks to automate, with dates and folders.
-- It writes what you pick, always after your approval, in the right file: `AGENTS.md` or `CLAUDE.md` depending on your project. Before touching a `settings.json`, it makes a `.bak` copy and checks the JSON stays valid.
-- It keeps its reports and a change log in `~/.claude/improve-system/` to measure their effect next time.
+```text
+~/.claude/projects/**/*.jsonl
+        │
+        ▼  scripts/digest.mjs  (read-only, masks secrets)
+   digest.md  →  report in chat  →  you pick a fix  →  it writes the fix
+                                        │
+                                        ▼
+                    ~/.claude/improve-system/changes.md
+                                        │
+                                        ▼  next run: did it work?
+```
+
+1. **Digest** — `scripts/digest.mjs` walks the last N days of sessions and produces one short Markdown file: your messages verbatim, detected corrections (`⚠️`), interruptions (`⏹`), close-wordings repeated across sessions, tool errors, permission denials, an active-time estimate, and the instruction files found on disk (`CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md`).
+2. **Report** — the model turns the digest into a report where every point cites a date, a folder and your own words. Anything seen in fewer than two sessions goes to "Weak signals".
+3. **Build** — you choose one recommendation; it shows the exact content, then writes it to the right file.
+4. **Follow-up** — the next run compares the same problem before/after the change and gives a verdict: `resolved`, `decreasing`, `no effect`, `not enough data`.
+
+### The report
+
+- **Follow-up** — raw counts with their base (sessions and messages in each period), plus rates such as corrections per 10 sessions. A rule that had no effect becomes a hook, never the same rule written twice.
+- **What Claude gets wrong** — recurring mistakes: count, number of sessions, two quotes, the fix.
+- **What you repeat** — instructions given across many sessions.
+- **Skills to create** — multi-step workflows you redo, with source sessions.
+- **Tasks to automate** — same request, same folder, every day or week.
+- **Weak signals** — one line each.
+- **Top 3 changes**, each tagged with impact (high/medium/low) and confidence (high/low).
+
+### The fix it writes
+
+| Problem | Fix |
+|---|---|
+| Short preference or convention | A rule in an instruction file |
+| Multi-step procedure | A skill |
+| Something that must always happen, or a rule Claude keeps breaking | A hook |
+| A task that needs no conversation | A script or a scheduled task |
+
+Rules land in `~/.claude/CLAUDE.md` (all projects) or in the project's `CLAUDE.md` / `AGENTS.md`, following whatever the project already uses — including `@AGENTS.md` imports. Hooks are merged into `settings.json` after copying it to `settings.json.bak`, with a JSON validity check and an automatic restore on failure. Nothing is written without showing you the content first.
 
 ## Weekly automatic report (macOS)
 
-Recommended: one automatic report per week, and you build the changes you like yourself.
+One report per week, built by you later. Nothing is modified during the scheduled run.
 
 ```bash
 bash ~/.claude/skills/improve-system/scripts/install-macos.sh --run-now
 ```
 
-By default, Mondays at 9:00 over the last 7 days (`--weekday 0-6`, `--hour`, `--minute`, `--days` to change it). `--run-now` starts a test run right away.
+Default: Mondays at 09:00 over the last 7 days. `--weekday 0-7`, `--hour`, `--minute`, `--days`, `--dry-run`, `--uninstall`.
 
-- The job runs `claude -p "/improve-system 7 auto"`. In `auto` mode, the skill writes the report to `~/.claude/improve-system/reports/` and stops: it asks nothing and builds nothing.
-- Its permissions are limited to what it needs: run `digest.mjs`, read, and write in the reports folder. It cannot change your `CLAUDE.md`, `settings.json` or skills.
-- The digest is created in a temp folder deleted at the end of the run, even on failure.
-- A macOS notification arrives when the report is ready. Then type `/improve-system`: it picks up the report if it is less than 3 days old instead of reading everything again, and asks what to build.
-- If the Mac is asleep at the scheduled time, the job runs on wake; if it is off, that week is skipped.
-- Logs: `~/.claude/improve-system/logs/` (12 weeks kept).
-- Uninstall: `bash ~/.claude/skills/improve-system/scripts/install-macos.sh --uninstall`.
-
-If the skill is installed somewhere other than `~/.claude/skills/`, run the script from its real folder: it derives the path of `digest.mjs` from there. Run the install again if you move the skill or change your Node or Claude Code installation.
+- Runs `claude -p "/improve-system 7 auto"` under launchd (`com.improve-system.weekly`).
+- `auto` mode only writes the report: no questions, no changes, nothing appended to `changes.md`.
+- Tool permissions limited to running `digest.mjs`, reading, and writing inside `~/.claude/improve-system/reports/` — it cannot touch `CLAUDE.md`, `settings.json` or skills.
+- The digest goes to a per-run temp directory deleted on exit, even on failure.
+- macOS notification when the report is ready. Type `/improve-system` within 3 days and it reuses that report instead of re-reading everything.
+- Asleep at the scheduled time → runs on wake. Machine off → that week is skipped.
+- Logs in `~/.claude/improve-system/logs/`, kept 12 weeks.
+- If the skill lives outside `~/.claude/skills/`, run the script from its real folder: it derives `digest.mjs` from there. Re-run it after moving the skill or changing your Node / Claude Code install.
 
 ## Privacy
 
-Secrets (API keys, tokens, passwords, private keys) are masked before the digest is written. Only you can read the digest; Claude deletes it at the end with the command the script prints (if a run is interrupted, the temp folder stays: delete it by hand). The model reads it like any message, and it is sent nowhere else. No session file is ever modified.
+- Read-only on session files: they are never edited, moved or deleted.
+- Secrets are masked to `[SECRET]` before anything is written — private keys, provider API keys (OpenAI/Anthropic, Stripe, GitHub, GitLab, Hugging Face, Slack, Google), JWTs, bearer tokens, credentials embedded in database URLs, and `*_key` / `*token*` / `*password*` assignments. Long high-entropy blobs are caught too.
+- The digest is written with mode `600` into a fresh `700` directory under `$TMPDIR` (or `--out`), never at a predictable shared path.
+- It is deleted after reading; the script prints the exact command (an interrupted run leaves the temp folder behind — delete it by hand).
+- Masking covers common formats, not every possible secret: read the digest before sharing it.
+
+The digest is read by the model like any prompt — it is sent nowhere else.
+
+## CLI reference
+
+```bash
+node scripts/digest.mjs [--days 7] [--out <file>] [--root <dir>] [--state <dir>]
+                        [--max-chars 180000] [--include-self]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--days N` | `7` | Window, 1–90 |
+| `--out FILE` | private temp dir | Where to write the digest |
+| `--root DIR` | `~/.claude/projects` | Session history root |
+| `--state DIR` | `~/.claude/improve-system` | Reports and change log location |
+| `--max-chars N` | `180000` | Digest budget; long messages are shortened, then the oldest sessions dropped |
+| `--include-self` | off | Keep sessions that ran `/improve-system` itself |
+
+Both `--days 14` and `--days=14` work. Unknown options are rejected. Exit codes: `0` success, `1` no history / write failure, `2` invalid arguments.
+
+## Repo layout
+
+```text
+SKILL.md                  the skill itself: procedure, rules, state files
+README.md
+scripts/digest.mjs        history → masked Markdown digest (stdlib only)
+scripts/install-macos.sh  weekly launchd job (--dry-run, --uninstall)
+test/digest.test.mjs      14 tests, node:test
+agents/openai.yaml        Codex interface metadata
+assets/codex-icon.svg
+```
 
 ## Tests
-
-Node.js 18+:
 
 ```bash
 node --test test/digest.test.mjs
 node --check scripts/digest.mjs
 ```
 
-Script options: `--days 7`, `--out <file>`, `--root <folder>`, `--state <folder>`, `--max-chars 180000`, `--include-self`. Both `--days 14` and `--days=14` work; unknown options are rejected.
+Covered: close-wording grouping, secret masking (messages and titles), resumed-session duplicates, malformed JSONL, date windowing, correction/interruption/error/denial counting, self-session skipping (including plugin prefixes), instruction-file detection with `@AGENTS.md` import, budget truncation, private output directory, argument parsing.
 
-## Metric limits
+## Compatibility
 
-"Active time" is an estimate from gaps between close events; it is not measured working time. Instruction files are detected on disk, with no guarantee Claude Code loaded them. Masking covers common secret formats but does not guarantee full anonymization: review the digest before sharing it.
+- **Claude Code** — primary target; reads `~/.claude/projects`, writes `~/.claude/...`.
+- **Codex** — `agents/openai.yaml` exposes `$improve-system`; the skill still reads the Claude Code history and writes to `~/.claude/`.
+- **Linux / Windows** — the digest is cross-platform; the scheduler script is macOS-only (launchd).
+
+## Limits
+
+- **Active time is an estimate**, from gaps under 15 minutes between events — not measured working time. Time saved by an automation is a hypothesis, never session length multiplied by repeat count.
+- **Instruction files are detected on disk**; that does not prove Claude Code loaded them.
+- `⚠️` corrections come from an English/French word list — hints to check against the surrounding messages, not verdicts.
+- Close formulations use Jaccard similarity at 0.76: candidates, verified by reading the originals.
+- Sub-agent transcripts are skipped; one level of `projects/<folder>/*.jsonl` only.
+- If the digest reports `truncated`, rerun with fewer days.
